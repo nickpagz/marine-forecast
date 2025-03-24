@@ -1,0 +1,901 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>5-Day Marine Forecast</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            text-align: center;
+            background-color: #001f3f;
+            color: #f0f0f0;
+        }
+
+        .forecast-container {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            overflow-x: auto; /* Enable horizontal scrolling */
+            -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS devices */
+            scroll-behavior: smooth; /* Smooth scrolling behavior */
+            padding-bottom: 10px; /* Add padding for scrollbar */
+            scrollbar-width: thin; /* Thin scrollbar for Firefox */
+        }
+
+        .forecast-item {
+            flex: 0 0 auto; /* Don't allow items to grow or shrink */
+            min-width: 150px;
+            text-align: center;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            margin: 0 5px;
+            background-color: #003366;
+        }
+
+        .forecast-item img {
+            width: 50px;
+            height: 50px;
+        }
+
+        #chart-container {
+            position: relative;
+            height: 400px;
+            width: 100%;
+            margin-bottom: 20px;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+</head>
+<body>
+    <h1>Marine Forecast</h1>
+    <div id="forecast" class="forecast-container"></div>
+    <div id="chart-container">
+        <canvas id="forecastChart"></canvas>
+    </div>
+    <div class="attribution" style="margin-top: 20px; font-size: 12px; opacity: 0.7;">
+        <a href="https://open-meteo.com/" style="color: #f0f0f0; text-decoration: underline;">Weather data by Open-Meteo.com</a>
+        <span style="margin-left: 15px;">Last updated: <span id="lastRefreshTime"></span></span>
+    </div>
+
+    <script>
+        // Configuration for wind safety parameters
+        const windSafetyConfig = {
+            // Safe wind direction range in degrees (NW to SSE = 315° to 157.5°)
+            minSafeDirection: 315, // NW
+            maxSafeDirection: 157.5, // SSE
+            // Wind speed limits in km/h
+            lowWindSpeedLimit: 7,  // Below this, direction is less important (yellow)
+            maxSafeSpeed: 9,       // Maximum safe wind speed
+            // Colors for the wind line
+            safeColor: "#1e7b1e",    // Green
+            cautionColor: "#ffcc00", // Yellow for low speeds from unsafe directions
+            unsafeColor: "#ff4040"   // Red
+        };
+
+        async function fetchWaveForecast() {
+            const url = "https://marine-api.open-meteo.com/v1/marine";
+            const params = new URLSearchParams({
+                latitude: 38.781155, // 38.7833,
+                longitude: 0.197843, // 0.1667,
+                hourly: "wave_height",
+                timezone: "Europe/Berlin"
+            });
+            const response = await fetch(`${url}?${params}`);
+            return response.json();
+        }
+
+        async function fetchRegularForecast() {
+            const url = "https://api.open-meteo.com/v1/forecast";
+            const params = new URLSearchParams({
+                latitude: 38.781155, // 38.7833,
+                longitude: 0.197843, // 0.1667,
+                current: "temperature_2m,weather_code,wind_speed_10m,wind_direction_10m",
+                hourly: "wind_speed_10m,wind_direction_10m",
+                daily: "weather_code,temperature_2m_max,temperature_2m_min,wind_speed_10m_max",
+                timezone: "Europe/Berlin"
+            });
+            const response = await fetch(`${url}?${params}`);
+            return response.json();
+        }
+
+        // 38.781155, 0.197843
+
+        function getWeatherIcon(weatherCode) {
+            const iconMap = {
+                0: "icons/sun.png",
+                1: "icons/sun.png",
+                2: "icons/clouds-and-sun.png",
+                3: "icons/clouds.png",
+                45: "icons/cloud.png",
+                48: "icons/cloud.png",
+                51: "icons/rainy.png",
+                53: "icons/rainy.png",
+                55: "icons/rainy.png",
+                56: "icons/rainy.png",
+                57: "icons/rainy.png",
+                61: "icons/rainy.png",
+                63: "icons/rainy.png",
+                65: "icons/rainy.png",
+                66: "icons/rainy.png",
+                67: "icons/snowflake.png",
+                71: "icons/snowflake.png",
+                73: "icons/snowflake.png",
+                75: "icons/snowflake.png",
+                77: "icons/snowflake.png",
+                80: "icons/rainy.png",
+                81: "icons/rainy.png",
+                82: "icons/rainy.png",
+                85: "icons/snowflake.png",
+                86: "icons/snowflake.png",
+                95: "icons/thunderstorm.png",
+                96: "icons/thunderstorm.png",
+                99: "icons/thunderstorm.png"
+            };
+            return iconMap[weatherCode] || "icons/default.png";
+        }
+
+        function renderCurrentWeather(currentData) {
+            if (!currentData || typeof currentData.weather_code === 'undefined') {
+                return `
+                    <div class="forecast-item">
+                        <h3>Now</h3>
+                        <p>Data not available</p>
+                    </div>
+                `;
+            }
+
+            const weatherIcon = getWeatherIcon(currentData.weather_code);
+            const temperature = Math.round(currentData.temperature_2m);
+            const windSpeed = Math.round(currentData.wind_speed_10m);
+            
+            // The API returns where wind is coming FROM, we need to show where it's going TO
+            const windDirectionFrom = currentData.wind_direction_10m;
+            const windDirectionTo = (windDirectionFrom + 180) % 360; // Rotate 180 degrees
+            
+            // For safety calculations, use the original direction (where wind is from)
+            const directionIsSafe = isDirectionInSafeRange(windDirectionFrom, 
+                windSafetyConfig.minSafeDirection, 
+                windSafetyConfig.maxSafeDirection);
+            
+            // Wind speed color (based only on speed)
+            let windSpeedColor;
+            if (windSpeed <= windSafetyConfig.lowWindSpeedLimit) {
+                windSpeedColor = windSafetyConfig.safeColor; // Green for low speeds
+            } else if (windSpeed <= windSafetyConfig.maxSafeSpeed) {
+                windSpeedColor = windSafetyConfig.cautionColor; // Yellow for medium speeds
+            } else {
+                windSpeedColor = windSafetyConfig.unsafeColor; // Red for high speeds
+            }
+            
+            // Wind arrow color (based on combined conditions)
+            let arrowColor;
+            if (directionIsSafe && windSpeed <= windSafetyConfig.maxSafeSpeed) {
+                arrowColor = windSafetyConfig.safeColor; // Safe - green
+            } else if (!directionIsSafe && windSpeed <= windSafetyConfig.lowWindSpeedLimit) {
+                arrowColor = windSafetyConfig.cautionColor; // Caution - yellow
+            } else {
+                arrowColor = windSafetyConfig.unsafeColor; // Unsafe - red
+            }
+            
+            // Create the HTML for the wind direction indicator with a colored border
+            const svgSize = 80;
+            const centerX = svgSize / 2;
+            const centerY = svgSize / 2;
+            const radius = 30;
+            
+            // Create a circular wind direction indicator with green/red sectors
+            let windDirectionIndicator = `
+                <div style="position: relative; width: ${svgSize}px; height: ${svgSize}px; margin: 0 auto;">
+                    <svg width="${svgSize}" height="${svgSize}" viewBox="0 0 ${svgSize} ${svgSize}">
+                        <!-- Create two arcs: one for safe direction, one for unsafe -->
+            `;
+            
+            // For the circular border, we're showing safe directions where wind can come FROM
+            const safeStartAngle = (windSafetyConfig.minSafeDirection - 90) * Math.PI / 180; // Convert to radians, adjust for SVG
+            const safeEndAngle = (windSafetyConfig.maxSafeDirection - 90) * Math.PI / 180;
+            
+            // Helper function to calculate SVG arc path
+            const describeArc = (x, y, radius, startAngle, endAngle, counterClockwise = false) => {
+                const start = {
+                    x: x + radius * Math.cos(startAngle),
+                    y: y + radius * Math.sin(startAngle)
+                };
+                const end = {
+                    x: x + radius * Math.cos(endAngle),
+                    y: y + radius * Math.sin(endAngle)
+                };
+                
+                const largeArcFlag = Math.abs(endAngle - startAngle) <= Math.PI ? 0 : 1;
+                const sweepFlag = counterClockwise ? 0 : 1;
+                
+                return [
+                    'M', start.x, start.y,
+                    'A', radius, radius, 0, largeArcFlag, sweepFlag, end.x, end.y
+                ].join(' ');
+            };
+            
+            // Handle the case where safe direction range crosses 0/360 boundary
+            if (windSafetyConfig.minSafeDirection > windSafetyConfig.maxSafeDirection) {
+                // Draw from min to 360 (2π)
+                windDirectionIndicator += `
+                    <path d="${describeArc(centerX, centerY, radius, safeStartAngle, 2 * Math.PI - Math.PI/2)}" 
+                          stroke="${windSafetyConfig.unsafeColor}" 
+                          fill="none" 
+                          stroke-width="3" />
+                `;
+                // Draw from 0 to max
+                windDirectionIndicator += `
+                    <path d="${describeArc(centerX, centerY, radius, -Math.PI/2, safeEndAngle)}" 
+                          stroke="${windSafetyConfig.unsafeColor}" 
+                          fill="none" 
+                          stroke-width="3" />
+                `;
+                
+                // Unsafe direction is from max to min
+                windDirectionIndicator += `
+                    <path d="${describeArc(centerX, centerY, radius, safeEndAngle, safeStartAngle)}" 
+                          stroke="${windSafetyConfig.safeColor}" 
+                          fill="none" 
+                          stroke-width="3" />
+                `;
+            } else {
+                // Safe direction is a single arc
+                windDirectionIndicator += `
+                    <path d="${describeArc(centerX, centerY, radius, safeStartAngle, safeEndAngle)}" 
+                          stroke="${windSafetyConfig.unsafeColor}" 
+                          fill="none" 
+                          stroke-width="3" />
+                `;
+                
+                // Unsafe direction is two arcs: from 0 to min, and from max to 360
+                windDirectionIndicator += `
+                    <path d="${describeArc(centerX, centerY, radius, -Math.PI/2, safeStartAngle)}" 
+                          stroke="${windSafetyConfig.safeColor}" 
+                          fill="none" 
+                          stroke-width="3" />
+                `;
+                windDirectionIndicator += `
+                    <path d="${describeArc(centerX, centerY, radius, safeEndAngle, 3 * Math.PI / 2)}" 
+                          stroke="${windSafetyConfig.safeColor}" 
+                          fill="none" 
+                          stroke-width="3" />
+                `;
+            }
+            
+            // Close the SVG and add the arrow in the center - now rotated to show where wind is blowing TO
+            windDirectionIndicator += `
+                    </svg>
+                    <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%) rotate(${windDirectionTo}deg); font-size: 24px; font-weight: bold; color: ${arrowColor};">
+                        &uarr;
+                    </div>
+                </div>
+            `;
+
+            const currentWeatherHTML = `
+                <div class="forecast-item">
+                    <h3>Now</h3>
+                    <div style="display: flex; align-items: center; justify-content: center;">
+                        <img src="${weatherIcon}" alt="Weather Icon" style="margin-right: 10px;" />
+                        <p>${temperature}°C</p>
+                    </div>
+                    <div style="display: flex; align-items: center; justify-content: center; flex-direction: column;">
+                        <p style="margin-bottom: 5px; color: ${windSpeedColor};">${windSpeed} km/h</p>
+                        ${windDirectionIndicator}
+                    </div>
+                </div>
+            `;
+
+            return currentWeatherHTML;
+        }
+
+        function renderDailyForecast(regularData) {
+            const forecastContainer = document.getElementById("forecast");
+            forecastContainer.innerHTML = ""; // Clear previous content
+
+            // Access the current weather data correctly
+            const currentWeatherHTML = renderCurrentWeather(regularData.current);
+            forecastContainer.innerHTML += currentWeatherHTML;
+
+            // Limit to 5 days of forecast
+            regularData.daily.time.slice(0, 5).forEach((date, index) => {
+                const maxTemp = Math.round(regularData.daily.temperature_2m_max[index]);
+                const minTemp = Math.round(regularData.daily.temperature_2m_min[index]);
+                const weatherCode = regularData.daily.weather_code[index];
+                const maxWindSpeed = Math.round(regularData.daily.wind_speed_10m_max[index]);
+                const weatherIcon = getWeatherIcon(weatherCode);
+
+                // Determine the label for the forecast tile
+                let dayLabel;
+                if (index === 0) {
+                    dayLabel = "Tomorrow";
+                } else {
+                    const dayOfWeek = new Date(date).toLocaleDateString(undefined, { weekday: 'long' });
+                    dayLabel = dayOfWeek;
+                }
+
+                const forecastItem = document.createElement("div");
+                forecastItem.className = "forecast-item";
+                forecastItem.innerHTML = `
+                    <h3>${dayLabel}</h3>
+                    <div style="display: flex; align-items: center; justify-content: center;">
+                        <img src="${weatherIcon}" alt="Weather Icon" style="margin-right: 10px;" />
+                        <div>
+                            <p>${maxTemp}°C</p>
+                            <p>${minTemp}°C</p>
+                        </div>
+                    </div>
+                    <p>Wind: ${maxWindSpeed} km/h</p>
+                `;
+                forecastContainer.appendChild(forecastItem);
+            });
+        }
+
+        // Helper function to check if a wind direction is within the safe range
+        function isDirectionInSafeRange(direction, minSafe, maxSafe) {
+            // Handle the case where the range crosses the 0/360 boundary
+            if (minSafe > maxSafe) {
+                return direction >= minSafe || direction <= maxSafe;
+            } else {
+                return direction >= minSafe && direction <= maxSafe;
+            }
+        }
+
+        // Helper function to convert degrees to cardinal direction
+        function getWindDirectionText(degrees) {
+            const directions = ['N', 'NNE', 'NE', 'ENE', 'E', 'ESE', 'SE', 'SSE', 
+                               'S', 'SSW', 'SW', 'WSW', 'W', 'WNW', 'NW', 'NNW'];
+            const index = Math.round(degrees / 22.5) % 16;
+            return directions[index];
+        }
+
+        // Create a gradient for the wind legend item
+        function createWindGradient(ctx) {
+            // We'll use a pattern to show both colors instead of a gradient
+            const canvas = document.createElement('canvas');
+            const size = 20;
+            canvas.width = size;
+            canvas.height = size;
+            const patternCtx = canvas.getContext('2d');
+            
+            // Draw the two colors as half and half
+            patternCtx.fillStyle = windSafetyConfig.safeColor;
+            patternCtx.fillRect(0, 0, size/2, size);
+            patternCtx.fillStyle = windSafetyConfig.unsafeColor;
+            patternCtx.fillRect(size/2, 0, size/2, size);
+            
+            return ctx.createPattern(canvas, 'repeat');
+        }
+
+        function movingAverage(data, windowSize) {
+            let result = [];
+            for (let i = 0; i < data.length; i++) {
+                if (i < windowSize - 1) {
+                    result.push(data[i]); // Not enough data to fill the window
+                } else {
+                    const windowData = data.slice(i - windowSize + 1, i + 1);
+                    const average = windowData.reduce((sum, val) => sum + val, 0) / windowSize;
+                    result.push(average);
+                }
+            }
+            return result;
+        }
+
+        // Store the chart instance globally so we can destroy it before refreshing
+        let forecastChart = null;
+
+        function renderChart(waveData, regularData, times) {
+            const ctx = document.getElementById("forecastChart").getContext("2d");
+            
+            // Destroy existing chart if it exists
+            if (forecastChart) {
+                forecastChart.destroy();
+            }
+
+            // Extract the necessary data
+            const waveHeights = movingAverage(waveData.hourly.wave_height.map(val => val || 0), 3);
+            const windSpeeds = movingAverage(regularData.hourly.wind_speed_10m.map(val => val || 0), 3);
+            const windDirections = regularData.hourly.wind_direction_10m;
+            
+            // Create an array to track safety for each data point, Make it globally accessible
+            window.windSafetyStatus = [];
+            
+            // Determine safety status for each data point
+            for (let i = 0; i < times.length; i++) {
+                const speed = windSpeeds[i];
+                const direction = windDirections[i];
+                
+                // Check if wind is within the safe direction range
+                const directionIsSafe = isDirectionInSafeRange(direction, 
+                    windSafetyConfig.minSafeDirection, 
+                    windSafetyConfig.maxSafeDirection);
+                
+                if (directionIsSafe && speed <= windSafetyConfig.maxSafeSpeed) {
+                    // Safe condition - green
+                    window.windSafetyStatus.push(0);
+                } else if (!directionIsSafe && speed <= windSafetyConfig.lowWindSpeedLimit) {
+                    // Caution - yellow (low speed but unsafe direction)
+                    window.windSafetyStatus.push(1);
+                } else {
+                    // Unsafe - red (unsafe direction with significant speed or high speed)
+                    window.windSafetyStatus.push(2);
+                }
+            }
+
+            // Create new chart and store the instance
+            forecastChart = new Chart(ctx, {
+                type: "line",
+                data: {
+                    labels: times,
+                    datasets: [
+                        {
+                            label: "Wave Height (m)",
+                            data: waveHeights,
+                            borderColor: "#00bfff",
+                            borderWidth: 2,
+                            fill: false,
+                            tension: 0.6,
+                            yAxisID: 'y1',
+                            pointRadius: 0,
+                            pointHoverRadius: 5,
+                            pointHoverBackgroundColor: "#00bfff",
+                            pointHoverBorderColor: "#fff",
+                            pointHoverBorderWidth: 2
+                        },
+                        {
+                            label: "Wind Speed (km/h)",
+                            data: windSpeeds,
+                            borderWidth: 2,
+                            fill: false,
+                            tension: 0.6,
+                            yAxisID: 'y2',
+                            pointRadius: 0,
+                            pointHoverRadius: 5,
+                            pointHoverBorderColor: "#fff",
+                            pointHoverBorderWidth: 2,
+                            pointHoverBackgroundColor: function(context) {
+                                // Color the hover point based on safety status
+                                const index = context.dataIndex;
+                                const status = window.windSafetyStatus[index];
+                                
+                                if (status === 0) return windSafetyConfig.safeColor;      // Safe - green
+                                if (status === 1) return windSafetyConfig.cautionColor;   // Caution - yellow
+                                return windSafetyConfig.unsafeColor;                      // Unsafe - red
+                            },
+                            // Use a custom segment style to change color based on conditions
+                            segment: {
+                                borderColor: function(context) {
+                                    // Get current point
+                                    const currentIndex = context.p1DataIndex;
+                                    const status = window.windSafetyStatus[currentIndex];
+                                    
+                                    // Return color based on the safety status
+                                    if (status === 0) return windSafetyConfig.safeColor;      // Safe - green
+                                    if (status === 1) return windSafetyConfig.cautionColor;   // Caution - yellow
+                                    return windSafetyConfig.unsafeColor;                      // Unsafe - red
+                                }
+                            }
+                        }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: {
+                            position: 'top',
+                            align: 'center',
+                            labels: {
+                                color: '#ffffff',
+                                usePointStyle: false, // Don't use point style (causes circles)
+                                boxWidth: 40,
+                                boxHeight: 3,
+                                font: {
+                                    size: 14,
+                                },
+                                padding: 20,
+                                generateLabels: function(chart) {
+                                    // Create custom labels manually
+                                    return [
+                                        {
+                                            text: "Wave Height (m)",
+                                            fillStyle: "#00bfff",
+                                            strokeStyle: "#00bfff",
+                                            lineWidth: 3,
+                                            hidden: false,
+                                            fontColor: "#ffffff",
+                                            fontStyle: 'normal'
+                                        },
+                                        {
+                                            text: "Safe Wind (km/h)",
+                                            fillStyle: windSafetyConfig.safeColor,
+                                            strokeStyle: windSafetyConfig.safeColor,
+                                            lineWidth: 3,
+                                            hidden: false,
+                                            fontColor: "#ffffff",
+                                            fontStyle: 'normal'
+                                        },
+                                        {
+                                            text: "Caution Wind (km/h)",
+                                            fillStyle: windSafetyConfig.cautionColor,
+                                            strokeStyle: windSafetyConfig.cautionColor,
+                                            lineWidth: 3,
+                                            hidden: false,
+                                            fontColor: "#ffffff",
+                                            fontStyle: 'normal'
+                                        },
+                                        {
+                                            text: "Unsafe Wind (km/h)",
+                                            fillStyle: windSafetyConfig.unsafeColor,
+                                            strokeStyle: windSafetyConfig.unsafeColor,
+                                            lineWidth: 3,
+                                            hidden: false,
+                                            fontColor: "#ffffff",
+                                            fontStyle: 'normal'
+                                        }
+                                    ];
+                                }
+                            },
+                            onClick: function() {
+                                // Disable the default click behavior
+                                return false;
+                            }
+                        },
+                        chartAreaBackground: {
+                            color: '#001f3f'
+                        },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false,
+                            backgroundColor: 'rgba(0, 31, 63, 0.8)',
+                            titleColor: '#f0f0f0',
+                            bodyColor: '#f0f0f0',
+                            borderColor: '#444',
+                            borderWidth: 1,
+                            padding: 10,
+                            displayColors: true,
+                            position: 'nearest',
+                            callbacks: {
+                                title: function(tooltipItems) {
+                                    const date = new Date(tooltipItems[0].parsed.x);
+                                    return date.toLocaleDateString(undefined, { 
+                                        weekday: 'short', 
+                                        year: 'numeric', 
+                                        month: 'short', 
+                                        day: 'numeric',
+                                        hour: '2-digit',
+                                        minute: '2-digit'
+                                    });
+                                },
+                                label: function(context) {
+                                    // Handle Wave Height
+                                    if (context.dataset.label === "Wave Height (m)") {
+                                        return `Wave Height: ${context.parsed.y.toFixed(1)} m`;
+                                    }
+                                    
+                                    // For wind data (whether it's "Wind Speed (km/h)", "Safe Wind", or "Unsafe Wind")
+                                    if (context.dataset.label.includes("Wind")) {
+                                        // Skip if the value is null
+                                        if (context.parsed.y === null) return null;
+                                        
+                                        // Get the index to find the corresponding wind direction
+                                        const index = context.dataIndex;
+                                        const direction = regularData.hourly.wind_direction_10m[index];
+                                        const directionText = getWindDirectionText(direction);
+                                        
+                                        // Simple tooltip with just speed and direction
+                                        return [
+                                            `Wind Speed: ${context.parsed.y.toFixed(1)} km/h`,
+                                            `Wind Direction: ${directionText} (${direction.toFixed(0)}°)`
+                                        ];
+                                    }
+                                    
+                                    return null;
+                                },
+                                // Override the label color
+                                labelColor: function(context) {
+                                    if (context.dataset.label === "Wave Height (m)") {
+                                        return {
+                                            borderColor: '#00bfff',
+                                            backgroundColor: '#00bfff'
+                                        };
+                                    }
+                                    
+                                    // For wind data, use the safety status color
+                                    if (context.dataset.label.includes("Wind")) {
+                                        const index = context.dataIndex;
+                                        const status = window.windSafetyStatus[index];
+                                        
+                                        let color;
+                                        if (status === 0) color = windSafetyConfig.safeColor;       // Safe - green
+                                        else if (status === 1) color = windSafetyConfig.cautionColor; // Caution - yellow
+                                        else color = windSafetyConfig.unsafeColor;                  // Unsafe - red
+                                        
+                                        return {
+                                            borderColor: color,
+                                            backgroundColor: color
+                                        };
+                                    }
+                                    
+                                    return {
+                                        borderColor: context.dataset.borderColor,
+                                        backgroundColor: context.dataset.borderColor
+                                    };
+                                }
+                            }
+                        }
+                    },
+                    interaction: {
+                        mode: 'index',
+                        intersect: false
+                    },
+                    hover: {
+                        mode: 'index',
+                        intersect: false
+                    },
+                    scales: {
+                        x: {
+                            type: "time",
+                            time: {
+                                unit: "day",
+                                displayFormats: {
+                                    day: 'EEE' // Display abbreviated day name
+                                }
+                            },
+                            ticks: {
+                                color: '#f0f0f0',
+                                source: 'data',
+                                autoSkip: false, // Don't skip labels
+                                maxRotation: 0,
+                                minRotation: 0,
+                                // Hide the default day labels, we'll draw our own
+                                display: false
+                            },
+                            grid: {
+                                color: '#444',
+                                lineWidth: 1,
+                                drawTicks: false,
+                                drawBorder: false
+                            },
+                            // Add padding to make space for custom labels
+                            afterFit: function(scaleInstance) {
+                                scaleInstance.paddingBottom = 25;
+                            }
+                        },
+                        y1: {
+                            type: 'linear',
+                            position: 'left',
+                            beginAtZero: true,
+                            min: 0,
+                            max: 2,
+                            title: {
+                                display: true,
+                                text: 'Wave Height (m)',
+                                color: '#f0f0f0'
+                            },
+                            ticks: {
+                                color: '#f0f0f0'
+                            },
+                            grid: {
+                                color: '#444'
+                            }
+                        },
+                        y2: {
+                            type: 'linear',
+                            position: 'right',
+                            beginAtZero: true,
+                            min: 0,
+                            max: 25,
+                            title: {
+                                display: true,
+                                text: 'Wind Speed (km/h)',
+                                color: '#f0f0f0'
+                            },
+                            ticks: {
+                                color: '#f0f0f0'
+                            },
+                            grid: {
+                                drawOnChartArea: false // only want the grid lines for one axis
+                            }
+                        }
+                    }
+                },
+                plugins: [{
+                    id: 'chartAreaBackground',
+                    beforeDraw: (chart) => {
+                        const ctx = chart.ctx;
+                        ctx.save();
+                        ctx.fillStyle = chart.config.options.plugins.chartAreaBackground.color;
+                        ctx.fillRect(0, 0, chart.width, chart.height);
+                        ctx.restore();
+                    }
+                }, {
+                    id: 'daytimeShading',
+                    beforeDatasetsDraw: (chart) => {
+                        const ctx = chart.ctx;
+                        const chartArea = chart.chartArea;
+                        const xAxis = chart.scales.x;
+                        
+                        // Get start and end times from the data
+                        const timeData = chart.data.labels;
+                        
+                        ctx.fillStyle = 'rgba(0, 50, 120, 0.5)';
+                        
+                        timeData.forEach((time, index) => {
+                            const currentTime = new Date(time);
+                            const hour = currentTime.getHours();
+                            
+                            // Check if time is between 8am and 3pm (15:00)
+                            if (hour >= 8 && hour < 15) {
+                                // Calculate x position for this time point
+                                const x = xAxis.getPixelForValue(time);
+                                
+                                // Calculate width for a single hour
+                                // Use the next data point if available, or approximate 1 hour width
+                                let nextX;
+                                if (index < timeData.length - 1) {
+                                    nextX = xAxis.getPixelForValue(timeData[index + 1]);
+                                } else {
+                                    // Estimate width based on previous points
+                                    const prevX = xAxis.getPixelForValue(timeData[index - 1]);
+                                    nextX = x + (x - prevX);
+                                }
+                                
+                                // Draw rectangle for this daytime hour
+                                ctx.fillRect(x, chartArea.top, nextX - x, chartArea.bottom - chartArea.top);
+                            }
+                        });
+                    }
+                }, {
+                    id: 'centeredDayLabels',
+                    afterDraw: (chart) => {
+                        const ctx = chart.ctx;
+                        const chartArea = chart.chartArea;
+                        const xAxis = chart.scales.x;
+                        
+                        // Get time data and find the center of each day
+                        const timeData = chart.data.labels;
+                        const days = {};
+                        
+                        // Group timepoints by day
+                        timeData.forEach(time => {
+                            const date = new Date(time);
+                            const dayKey = date.toISOString().split('T')[0]; // YYYY-MM-DD format
+                            
+                            if (!days[dayKey]) {
+                                days[dayKey] = {
+                                    day: dayKey,
+                                    date: new Date(dayKey),
+                                    label: date.toLocaleDateString(undefined, { weekday: 'short' }),
+                                    points: []
+                                };
+                            }
+                            
+                            // Store x-position for this time
+                            days[dayKey].points.push(xAxis.getPixelForValue(time));
+                        });
+                        
+                        // Convert to array and sort by date
+                        const sortedDays = Object.values(days).sort((a, b) => a.date - b.date);
+                        
+                        // Check for duplicate day names and handle them
+                        const seenDayNames = new Set();
+                        
+                        // Skip the first day if it has fewer data points (likely incomplete)
+                        const startIndex = sortedDays.length > 0 && sortedDays[0].points.length < 12 ? 1 : 0;
+                        
+                        // Draw labels for each day, skipping the first partial day
+                        sortedDays.slice(startIndex).forEach(day => {
+                            if (day.points.length) {
+                                // Check if we've seen this day name before
+                                if (seenDayNames.has(day.label)) {
+                                    // For duplicate day names, add a "*" or other indicator if needed
+                                    // day.label += "*";
+                                } else {
+                                    seenDayNames.add(day.label);
+                                }
+                                
+                                // Find min and max x for the day
+                                const minX = Math.min(...day.points);
+                                const maxX = Math.max(...day.points);
+                                const centerX = minX + (maxX - minX) / 2;
+                                
+                                // Draw the centered day label
+                                ctx.save();
+                                ctx.fillStyle = '#f0f0f0';
+                                ctx.textAlign = 'center';
+                                ctx.textBaseline = 'top';
+                                ctx.font = 'bold 14px Arial';
+                                
+                                // Position the label with enough space from the bottom of the chart
+                                ctx.fillText(day.label, centerX, chartArea.bottom + 10);
+                                
+                                ctx.restore();
+                            }
+                        });
+                    }
+                }, {
+                    id: 'verticalHoverLine',
+                    beforeDraw: (chart) => {
+                        if (chart.tooltip && chart.tooltip.active) {
+                            const ctx = chart.ctx;
+                            const chartArea = chart.chartArea;
+                            const x = chart.tooltip.caretX;
+                            
+                            // Draw vertical line
+                            ctx.save();
+                            ctx.beginPath();
+                            ctx.moveTo(x, chartArea.top);
+                            ctx.lineTo(x, chartArea.bottom);
+                            ctx.lineWidth = 1;
+                            ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+                            ctx.setLineDash([5, 5]); // Create a dashed line
+                            ctx.stroke();
+                            ctx.restore();
+                        }
+                    }
+                }]
+            });
+        }
+
+        async function init() {
+            try {
+                // Show loading indicator
+                document.getElementById('lastRefreshTime').textContent = "Refreshing...";
+                
+                const waveData = await fetchWaveForecast();
+                const regularData = await fetchRegularForecast();
+                console.log('Regular data:', regularData);
+                
+                // Ensure the times array uses the original hourly data
+                const times = regularData.hourly.time.map(time => new Date(time));
+
+                renderDailyForecast(regularData);
+                renderChart(waveData, regularData, times);
+                
+                // Update last refresh time
+                document.getElementById('lastRefreshTime').textContent = new Date().toLocaleTimeString();
+                
+                // Flash the timestamp briefly to show it updated
+                document.querySelector('.attribution').style.opacity = '1';
+                setTimeout(() => {
+                    document.querySelector('.attribution').style.opacity = '0.7';
+                }, 1000);
+                
+            } catch (error) {
+                console.error('Error refreshing data:', error);
+                document.getElementById('lastRefreshTime').textContent = "Error refreshing data";
+            }
+        }
+
+        // Initial load
+        init();
+        
+        // Set up auto-refresh every 10 minutes (600000 milliseconds)
+        setInterval(() => {
+            console.log('Auto-refreshing forecast data...');
+            init();
+        }, 600000);
+    </script>
+</body>
+</html>
+
+<!--
+Safe wind directions at Arenal:
+NW to SSE
+Safe wind directions at Grenedalla:
+SW to NE
+Color the wind direction arrow in the current weather.
+Color the wind direction line on the chart based on safe or unsafe wind direction. Under 9 kph is safe.
+
+Features to add:
+- Page responsiveness. Works OK, but could look better.
+- Front-end configurable settings.
+- Wave direction. Directly away from shore could mean almost no local waves.
+- https://pimylifeup.com/raspberry-pi-public-static-website/
+
+-->
